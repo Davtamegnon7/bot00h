@@ -753,48 +753,42 @@ def finish_xau_trade(exit_price: float, reason: str, detail: str):
 # ============================================================================
 def analyze_eur_us_session(candles: list, session_date: str) -> dict:
     """
-    Des 13h00 UTC, examine les bougies M15 de la session US (13h00 -> 21h45) :
-    1. Verifie la baisse en debut de session.
+    A 21h45 UTC (une fois la session US 13h00 -> 21h45 complete) :
+    1. Verifie la baisse de la session.
     2. Trace Support (plus bas de la baisse), TP1 (plus haut du range apres la baisse)
-       et TP2 (plus haut structurel au-dessus de TP1), et demarre la surveillance immediatement.
+       et TP2 (plus haut structurel au-dessus de TP1).
     """
     tz = timezone(timedelta(hours=CFG["tz_offset_hours"]))
     us_bars = []
-    pre_bars = []
     for c in candles:
         dt = datetime.fromtimestamp(c["epoch"], tz)
-        if dt.strftime("%Y-%m-%d") == session_date:
-            if 13 <= dt.hour <= 21:
-                us_bars.append(c)
-            elif 10 <= dt.hour < 13:
-                pre_bars.append(c)
+        if dt.strftime("%Y-%m-%d") == session_date and (
+            (13 <= dt.hour < 21) or (dt.hour == 21 and dt.minute <= 45)
+        ):
+            us_bars.append(c)
 
-    if len(us_bars) < 4:
-        return {"valid": False, "reason": f"Session US {session_date} vient de demarrer ({len(us_bars)} bougies depuis 13h00)."}
+    if len(us_bars) < 20:
+        return {"valid": False, "reason": f"Session US {session_date} incomplete ({len(us_bars)} bougies)."}
 
-    # Point haut de debut de session (13h00 -> 16h00 ou pre-session immediate)
-    early_bars = (pre_bars[-4:] + us_bars[:12]) if pre_bars else us_bars[:12]
-    session_start_high = max(b["high"] for b in early_bars)
-
-    # Recherche du plus bas de la baisse (en laissant au moins les 2 dernieres bougies pour le debut du range)
-    search_bars = us_bars[:-2] if len(us_bars) >= 5 else us_bars
+    session_start_high = max(b["high"] for b in us_bars[:16])
+    # Le plus bas de la baisse doit laisser au moins 3 bougies de range avant 21h45
+    search_bars = us_bars[:-3]
     low_idx = min(range(len(search_bars)), key=lambda i: search_bars[i]["low"])
     support = search_bars[low_idx]["low"]
     support_epoch = search_bars[low_idx]["epoch"]
 
     drop_pips = (session_start_high - support) * 10000.0
-    if drop_pips < 10.0:
+    if drop_pips < 12.0:
         return {
             "valid": False,
-            "reason": f"Session US {session_date} : attente d'une baisse en debut de session (amplitude actuelle {drop_pips:.1f} pips).",
+            "reason": f"Session US {session_date} : pas de baisse suffisante ({drop_pips:.1f} pips).",
         }
 
-    # Range forme apres le plus bas de la baisse
     post_drop = [b for b in us_bars if b["epoch"] > support_epoch]
-    if len(post_drop) < 2:
+    if len(post_drop) < 3:
         return {
             "valid": False,
-            "reason": f"Session US {session_date} : baisse en cours (plus bas provisoire {support:.5f}), attente du rebond / range pour fixer TP1.",
+            "reason": f"Session US {session_date} : pas de range forme apres le plus bas avant 21h45.",
         }
 
     tp1_idx = max(range(len(post_drop)), key=lambda i: post_drop[i]["high"])
@@ -802,12 +796,10 @@ def analyze_eur_us_session(candles: list, session_date: str) -> dict:
     tp1_epoch = post_drop[tp1_idx]["epoch"]
     tp2 = round(max(session_start_high, tp1 + (tp1 - support) * 0.65), 5)
 
-    recent_sample = us_bars[-8:] if len(us_bars) >= 8 else us_bars
-    avg_bar_pips = sum((b["high"] - b["low"]) * 10000.0 for b in recent_sample) / len(recent_sample)
+    avg_bar_pips = sum((b["high"] - b["low"]) * 10000.0 for b in us_bars[-8:]) / 8.0
     touch_tol_pips = max(1.8, min(3.5, round(avg_bar_pips * 0.35, 1)))
     break_tol_pips = max(5.0, round(avg_bar_pips * 0.90, 1))
 
-    # Debut et fin du rectangle violet de la session (13h00 -> 21h45)
     dt_day = datetime.strptime(session_date, "%Y-%m-%d").replace(tzinfo=tz)
     rect_start_epoch = int(dt_day.replace(hour=13, minute=0).timestamp())
     rect_end_epoch = int(dt_day.replace(hour=21, minute=45).timestamp())
@@ -825,7 +817,7 @@ def analyze_eur_us_session(candles: list, session_date: str) -> dict:
         "broken_alert_sent": False,
         "support_epoch": support_epoch,
         "tp1_epoch": tp1_epoch,
-        "analysis_epoch": max(support_epoch, tp1_epoch),
+        "analysis_epoch": rect_end_epoch,
         "rect_start_epoch": rect_start_epoch,
         "rect_end_epoch": rect_end_epoch,
     }
@@ -833,49 +825,56 @@ def analyze_eur_us_session(candles: list, session_date: str) -> dict:
 
 def step_eur_strategy(now_dt: datetime):
     candles = fetch_m15_candles(CFG["eur_symbol"], 80)
+    today_str = now_dt.strftime("%Y-%m-%d")
     with STATE_LOCK:
         STATE["eur_candles"] = candles[-68:]
         active_tr = STATE["eur_active_trade"]
         plan = STATE["eur_plan"]
 
-    # Date de la session US active (celle d'aujourd'hui a partir de 13h00, ou celle de la veille avant 13h00)
-    session_dt = now_dt if now_dt.hour >= 13 else (now_dt - timedelta(days=1))
+    # 1. Pendant la session US (13h00 -> 21h44) : observer uniquement, ne rien tracer ni acheter
+    if 13 <= now_dt.hour < 21 or (now_dt.hour == 21 and now_dt.minute < 45):
+        with STATE_LOCK:
+            STATE["eur_plan"] = None
+            if active_tr is None:
+                STATE["eur_status"] = "OBSERVATION SESSION US (13h00 – 21h45 : attente 21h45 pour tracer Support / TP1 / TP2)"
+        if active_tr is not None:
+            check_eur_active_trade(candles)
+        return
+
+    # 2. A partir de 21h45 (ou avant 13h00 le lendemain) : tracer les niveaux de la session terminee a 21h45
+    session_dt = now_dt if now_dt.hour >= 21 else (now_dt - timedelta(days=1))
     session_str = session_dt.strftime("%Y-%m-%d")
 
-    # 1. Si un trade EUR/USD est en cours, suivre ses objectifs TP1 / TP2
+    with STATE_LOCK:
+        already_analyzed = STATE["eur_last_session_date"] == session_str
+    if not already_analyzed:
+        new_plan = analyze_eur_us_session(candles, session_str)
+        with STATE_LOCK:
+            STATE["eur_last_session_date"] = session_str
+        if not new_plan.get("valid"):
+            with STATE_LOCK:
+                STATE["eur_plan"] = None
+                STATE["eur_status"] = new_plan.get("reason", "Pas de configuration valide a 21h45.")
+            log_event("EURUSD_US", "ANALYSE_21H45", new_plan.get("reason", "Session invalide."))
+            return
+        with STATE_LOCK:
+            STATE["eur_plan"] = new_plan
+            STATE["eur_status"] = (
+                f"SURVEILLANCE POST-21H45 : Support={new_plan['support']:.5f} | TP1={new_plan['tp1']:.5f} | TP2={new_plan['tp2']:.5f}"
+            )
+        log_event(
+            "EURUSD_US",
+            "NIVEAUX_21H45",
+            f"Session {session_str} terminee a 21h45 : Baisse ({new_plan['drop_pips']} pips) + range. Support={new_plan['support']:.5f}, TP1={new_plan['tp1']:.5f}, TP2={new_plan['tp2']:.5f} (tolerance ~{new_plan['touch_tol_pips']} pips).",
+        )
+        plan = new_plan
+
+    # 3. Si un trade EUR/USD est en cours, suivre ses objectifs TP1 / TP2
     if active_tr is not None:
         check_eur_active_trade(candles)
         return
 
-    # 2. Des 13h00 UTC, tracer / mettre a jour les niveaux (Support, TP1, TP2) et demarrer la surveillance
-    if plan is None or plan.get("session_date") != session_str or (13 <= now_dt.hour <= 21 and not plan.get("shifted")):
-        new_plan = analyze_eur_us_session(candles, session_str)
-        if new_plan.get("valid"):
-            changed = (
-                plan is None
-                or plan.get("session_date") != session_str
-                or abs(plan.get("support", 0) - new_plan["support"]) > 0.00001
-                or abs(plan.get("tp1", 0) - new_plan["tp1"]) > 0.00001
-            )
-            with STATE_LOCK:
-                STATE["eur_plan"] = new_plan
-                STATE["eur_last_session_date"] = session_str
-                STATE["eur_status"] = (
-                    f"SURVEILLANCE ACTIVE (des 13h) : Support={new_plan['support']:.5f} | TP1={new_plan['tp1']:.5f} | TP2={new_plan['tp2']:.5f}"
-                )
-            if changed:
-                log_event(
-                    "EURUSD_US",
-                    "NIVEAUX_TRACES",
-                    f"Session {session_str} : Baisse ({new_plan['drop_pips']} pips) + range. Support={new_plan['support']:.5f}, TP1={new_plan['tp1']:.5f}, TP2={new_plan['tp2']:.5f} (surveillance active, tolerance ~{new_plan['touch_tol_pips']} pips).",
-                )
-            plan = new_plan
-        elif plan is None:
-            with STATE_LOCK:
-                STATE["eur_status"] = new_plan.get("reason", "Attente formation de la baisse et du range (session 13h00).")
-            return
-
-    # 3. Surveillance active sans limite de temps des niveaux Support et TP1 (des qu'une bougie suit le trace)
+    # 4. Surveillance sans limite de temps apres 21h45 des niveaux Support et TP1
     if plan is not None and len(candles) >= 2:
         last_closed = candles[-2]
         if last_closed["epoch"] <= plan["analysis_epoch"]:
@@ -900,7 +899,7 @@ def step_eur_strategy(now_dt: datetime):
                 )
             return
 
-        # Regle 3a : Le prix retouche le support (a quelques pips pres) -> ACHAT (Objectifs TP1 puis TP2)
+        # Regle 3a : Le prix retouche le support (a quelques pips pres) apres 21h45 -> ACHAT (Objectifs TP1 puis TP2)
         if bl <= (sup + tol) and bl >= (sup - brk):
             plan["touch_epoch"] = last_closed["epoch"]
             plan["touch_price"] = sup
@@ -908,7 +907,7 @@ def step_eur_strategy(now_dt: datetime):
                 plan,
                 last_closed,
                 tp2,
-                f"Retouche du Support ({sup:.5f}) par la bougie (bas={bl:.5f}, ecart={abs(bl - sup)*10000:.1f} pips <= tolerance {plan['touch_tol_pips']} pips) -> BUY avec objectifs TP1 ({tp1:.5f}) puis TP2 ({tp2:.5f}).",
+                f"Retouche du Support ({sup:.5f}) apres 21h45 par la bougie (bas={bl:.5f}, ecart={abs(bl - sup)*10000:.1f} pips <= tolerance {plan['touch_tol_pips']} pips) -> BUY avec objectifs TP1 ({tp1:.5f}) puis TP2 ({tp2:.5f}).",
             )
             return
 
@@ -971,7 +970,7 @@ def open_eur_trade(plan: dict, bar: dict, target_tp: float, reason_note: str):
     tr["db_id"] = tid
     with STATE_LOCK:
         STATE["eur_active_trade"] = tr
-        STATE["eur_plan"] = None
+        STATE["eur_plan"] = plan
         STATE["eur_status"] = f"BUY EURUSD ACTIF (Ticket #{ticket} | Objectif {target_tp:.5f})"
     log_event("EURUSD_US", "ACHAT_DECLENCHE", reason_note)
 
@@ -1056,11 +1055,11 @@ def render_dashboard_html() -> str:
         else "<span class='badge' style='background:#dc2626;'>MT5 Déconnecté</span>"
     )
 
-    eur_plan_html = "En attente de la baisse initiale de la session US (dès 13h00)."
+    eur_plan_html = "Pendant la session US (13h00 – 21h45) : observation uniquement. Tracé et surveillance à 21h45."
     if st["eur_plan"]:
         p = st["eur_plan"]
         eur_plan_html = (
-            f"Session {p['session_date']} (dès 13h) : <b>Support = {p['support']:.5f}</b> | "
+            f"Session {p['session_date']} (tracée à 21h45) : <b>Support = {p['support']:.5f}</b> | "
             f"<b>TP1 = {p['tp1']:.5f}</b> | <b>TP2 = {p['tp2']:.5f}</b> "
             f"(tolérance retouche : {p['touch_tol_pips']} pips)"
         )
@@ -1159,7 +1158,7 @@ def render_dashboard_html() -> str:
       </div>
     </div>
     <div class="card">
-      <div class="lbl">STRATÉGIE 2 — EURUSD M15 (Session US 13h00 – 21h45, Tracé & Surveillance dès 13h00)</div>
+      <div class="lbl">STRATÉGIE 2 — EURUSD M15 (Session US 13h00 – 21h45, Tracé & Surveillance à 21h45)</div>
       <div style="margin-top:8px;font-weight:600;color:#a78bfa;">{html.escape(st['eur_status'])}</div>
       <div style="margin-top:6px;font-size:13px;color:#cbd5e1;">{eur_plan_html}</div>
     </div>
@@ -1167,8 +1166,8 @@ def render_dashboard_html() -> str:
 
   <div class="panel" style="padding:14px;">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-      <h3 style="margin:0;">📈 Graphique Direct EUR/USD · 15m (Rectangle Session US 13h–21h45 + Support / TP1 / TP2)</h3>
-      <span style="color:#94a3b8;font-size:12px;">Mis à jour automatiquement dès 13h00</span>
+      <h3 style="margin:0;">📈 Graphique Direct EUR/USD · 15m (Rectangle Session US 13h–21h45 + Support / TP1 / TP2 tracés à 21h45)</h3>
+      <span style="color:#94a3b8;font-size:12px;">Schéma complet figé à 21h45</span>
     </div>
     <canvas id="eurChart" width="1200" height="440" style="width:100%;height:440px;background:#0b0e14;border-radius:8px;border:1px solid #1e293b;display:block;"></canvas>
   </div>

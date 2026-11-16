@@ -276,13 +276,15 @@ def ensure_mt5_connected() -> bool:
     if mt5 is None:
         try:
             acc = fetch_deriv_cloud_account()
+            ok_cloud = bool(acc.get("account_id"))
             with STATE_LOCK:
-                STATE["mt5_connected"] = bool(acc.get("account_id"))
+                STATE["mt5_connected"] = ok_cloud
                 STATE["account_login"] = acc.get("account_id", "CLOUD-DEMO")
                 STATE["account_server"] = f"Deriv-Cloud ({acc.get('account_type', 'demo')})"
                 STATE["account_balance"] = float(acc.get("balance", 10000.0))
                 STATE["account_equity"] = float(acc.get("balance", 10000.0))
                 STATE["account_currency"] = acc.get("currency", "USD")
+            return ok_cloud
         except Exception:
             with STATE_LOCK:
                 STATE["mt5_connected"] = False
@@ -982,12 +984,23 @@ def bot_loop():
     else:
         log_event("SYSTEME", "ATTENTION_MT5", "Terminal MT5 non detecte au demarrage, nouvelle tentative automatique...")
 
+    last_ping = 0.0
     while True:
         try:
             ensure_mt5_connected()
             now_dt = datetime.now(tz)
             step_xau_strategy(now_dt)
             step_eur_strategy(now_dt)
+            # Keep-alive Render Free Tier (toutes les 4 minutes via l'URL publique Render)
+            if time.time() - last_ping > 240.0:
+                last_ping = time.time()
+                ext_url = os.environ.get("RENDER_EXTERNAL_URL", "https://bot00h.onrender.com").rstrip("/")
+                if ext_url:
+                    try:
+                        import urllib.request
+                        urllib.request.urlopen(ext_url + "/api/status", timeout=8).read()
+                    except Exception:
+                        pass
         except Exception as e:
             log_event("SYSTEME", "ERREUR_BOUCLE", f"Erreur temporaire : {e}")
         time.sleep(10)

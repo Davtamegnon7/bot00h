@@ -418,14 +418,35 @@ def analyze_eur_us_session(candles: list, session_date: str) -> dict:
     if height_pips < 5.0:
         return {"valid": False, "reason": f"Amplitude US trop faible ({height_pips:.1f} pips)"}
 
-    tp1 = highest_high
-    tp2 = tp1 + height
+    is_bear_session = (high_idx < low_idx)
+    session_type = "BAISSE" if is_bear_session else "HAUSSE"
     tolerance = CFG["tolerance_pips"] * CFG["pip_size"]
+
+    if session_type == "BAISSE":
+        trigger_level = lowest_low
+        level_name = "Support"
+        trade_dir = "BUY"
+        ctype = "MULTUP"
+        tp1 = highest_high
+        tp2 = tp1 + height
+    else:
+        trigger_level = highest_high
+        level_name = "Résistance"
+        trade_dir = "SELL"
+        ctype = "MULTDOWN"
+        tp1 = lowest_low
+        tp2 = tp1 - height
 
     return {
         "valid": True,
         "session_date": session_date,
+        "session_type": session_type,
+        "trade_direction": trade_dir,
+        "contract_type": ctype,
+        "trigger_level": round(trigger_level, 5),
+        "level_name": level_name,
         "support": round(lowest_low, 5),
+        "resistance": round(highest_high, 5),
         "support_time": low_time,
         "tp1": round(tp1, 5),
         "tp1_time": high_time,
@@ -512,58 +533,88 @@ def step_eurusd_bot(now_dt: datetime):
         tp1 = plan["tp1"]
         tp2 = plan["tp2"]
         tol = plan["tolerance"]
+        session_type = plan.get("session_type", "BAISSE")
 
-        # Cas B : Le cours monte toucher/casser TP1 SANS avoir touche le Support en premier
-        # Alors TP1 devient le nouveau Support et l'objectif devient TP2
-        if not plan.get("tp1_is_support", False) and last_bar["high"] >= tp1:
-            plan["tp1_is_support"] = True
-            plan["support"] = tp1
-            plan["support_time"] = "Cassure TP1"
-            with STATE_LOCK:
-                STATE["plan"] = plan
-                STATE["phase_detail"] = f"TP1 atteint en premier -> TP1 ({tp1:.5f}) devient le nouveau Support ! Cible = TP2 ({tp2:.5f})"
-            log_event(
-                "TP1_DEVIENT_SUPPORT",
-                f"Le prix a touché TP1 ({tp1:.5f}) sans avoir retouché le Support initial. TP1 devient le nouveau Support, objectif TP2 ({tp2:.5f}).",
-            )
-            return
+        # Cas 1 : Session de Baisse -> BUY sur retouche du Support
+        if session_type == "BAISSE":
+            if not plan.get("tp1_is_support", False) and last_bar["high"] >= tp1:
+                plan["tp1_is_support"] = True
+                plan["support"] = tp1
+                plan["support_time"] = "Cassure TP1"
+                with STATE_LOCK:
+                    STATE["plan"] = plan
+                    STATE["phase_detail"] = f"TP1 atteint en premier -> TP1 ({tp1:.5f}) devient le nouveau Support ! Cible = TP2 ({tp2:.5f})"
+                log_event(
+                    "TP1_DEVIENT_SUPPORT",
+                    f"Le prix a touché TP1 ({tp1:.5f}) sans avoir retouché le Support initial. TP1 devient le nouveau Support, objectif TP2 ({tp2:.5f}).",
+                )
+                return
 
-        # Cas A : Retouche du Support (avec tolerance 1.8 pips au-dessus du support)
-        # La meche basse de la bougie entre dans la zone [support, support + tol]
-        target_tp = tp2 if plan.get("tp1_is_support") else tp1
-        zone_high = support + tol
+            target_tp = tp2 if plan.get("tp1_is_support") else tp1
+            zone_high = support + tol
+            if last_bar["low"] <= zone_high and last_bar["close"] >= (support - 0.00030):
+                gap_pips = (last_bar["low"] - support) / CFG["pip_size"]
+                note = (
+                    f"Retouche du Support ({support:.5f}) après 21h45 par la bougie "
+                    f"(bas={last_bar['low']:.5f}, écart={gap_pips:.1f} pips <= {plan['tolerance_pips']} pips) "
+                    f"-> BUY MULTUP avec objectif {target_tp:.5f}"
+                )
+                execute_eur_order("BUY", plan, last_bar, target_tp, note)
+                return
 
-        if last_bar["low"] <= zone_high and last_bar["close"] >= (support - 0.00030):
-            gap_pips = (last_bar["low"] - support) / CFG["pip_size"]
-            note = (
-                f"Retouche du Support ({support:.5f}) après 21h45 par la bougie "
-                f"(bas={last_bar['low']:.5f}, écart={gap_pips:.1f} pips <= {plan['tolerance_pips']} pips) "
-                f"-> BUY MULTUP avec objectif {target_tp:.5f}"
-            )
-            execute_eur_buy(plan, last_bar, target_tp, note)
-            return
+        # Cas 2 : Session de Hausse -> SELL sur retouche de la Résistance
+        elif session_type == "HAUSSE":
+            resistance = plan["resistance"]
+            tp1_sell = plan["tp1"]
+            tp2_sell = plan["tp2"]
+
+            if not plan.get("tp1_is_resistance", False) and last_bar["low"] <= tp1_sell:
+                plan["tp1_is_resistance"] = True
+                plan["resistance"] = tp1_sell
+                with STATE_LOCK:
+                    STATE["plan"] = plan
+                    STATE["phase_detail"] = f"TP1 atteint en premier -> TP1 ({tp1_sell:.5f}) devient la nouvelle Résistance ! Cible = TP2 ({tp2_sell:.5f})"
+                log_event(
+                    "TP1_DEVIENT_RESISTANCE",
+                    f"Le prix a touché TP1 ({tp1_sell:.5f}) sans avoir retouché la Résistance. Cible = TP2 ({tp2_sell:.5f}).",
+                )
+                return
+
+            target_tp = tp2_sell if plan.get("tp1_is_resistance") else tp1_sell
+            zone_low = resistance - tol
+            if last_bar["high"] >= zone_low and last_bar["close"] <= (resistance + 0.00030):
+                gap_pips = (resistance - last_bar["high"]) / CFG["pip_size"]
+                note = (
+                    f"Retouche de la Résistance ({resistance:.5f}) après 21h45 par la bougie "
+                    f"(haut={last_bar['high']:.5f}, écart={gap_pips:.1f} pips <= {plan['tolerance_pips']} pips) "
+                    f"-> SELL MULTDOWN avec objectif {target_tp:.5f}"
+                )
+                execute_eur_order("SELL", plan, last_bar, target_tp, note)
+                return
 
     # E) Suivi d'un trade actif
     if active_tr is not None:
         manage_active_trade(candles)
 
 
-def execute_eur_buy(plan: dict, bar: dict, target_tp: float, reason_note: str):
+def execute_eur_order(direction: str, plan: dict, bar: dict, target_tp: float, reason_note: str):
     entry_px = bar["close"]
+    ctype = "MULTUP" if direction.upper() == "BUY" else "MULTDOWN"
+    sl_px = (plan["support"] - 0.0010) if direction == "BUY" else (plan.get("resistance", entry_px + 0.0010) + 0.0010)
     cid, exec_px = deriv_open_multiplier_contract(
-        "BUY",
+        direction,
         entry_px,
         target_tp,
-        sl_px=plan["support"] - 0.0010,
+        sl_px=sl_px,
     )
 
     tr = {
         "session_date": plan["session_date"],
         "symbol": CFG["symbol"],
-        "direction": "BUY",
-        "contract_type": "MULTUP",
+        "direction": direction,
+        "contract_type": ctype,
         "entry_price": round(exec_px, 5),
-        "support_level": plan["support"],
+        "support_level": plan.get("support", 0.0),
         "tp1_level": plan["tp1"],
         "tp2_level": plan["tp2"],
         "stake_usd": CFG["stake_usd"],
@@ -578,9 +629,9 @@ def execute_eur_buy(plan: dict, bar: dict, target_tp: float, reason_note: str):
     with STATE_LOCK:
         STATE["active_trade"] = tr
         STATE["phase"] = "TRADE_ACTIF"
-        STATE["phase_detail"] = f"Achat MULTUP ouvert @ {exec_px:.5f} (Cible: {target_tp:.5f} | Contrat #{cid})"
+        STATE["phase_detail"] = f"Ordre {direction} {ctype} ouvert @ {exec_px:.5f} (Cible: {target_tp:.5f} | Contrat #{cid})"
 
-    log_event("ACHAT_DECLENCHE", reason_note)
+    log_event("ORDRE_DECLENCHE", reason_note)
 
 
 def manage_active_trade(candles: list):
@@ -592,12 +643,25 @@ def manage_active_trade(candles: list):
         return
 
     cur_px = candles[-1]["close"]
-    target_tp = plan["tp2"] if plan.get("tp1_is_support") else plan["tp1"]
+    target_tp = plan["tp2"] if plan.get("tp1_is_support") or plan.get("tp1_is_resistance") else plan["tp1"]
 
     # 1. Vérification si TP atteint
-    if cur_px >= target_tp:
+    if tr["direction"] == "BUY" and cur_px >= target_tp:
         pnl_est = round(tr["stake_usd"] * tr["multiplier"] * ((cur_px - tr["entry_price"]) / tr["entry_price"]), 2)
-        record_trade_close(tr["id"], cur_px, "Take Profit Atteint", pnl_est, f"Objectif {target_tp:.5f} atteint !")
+        record_trade_close(tr["id"], cur_px, "Take Profit Atteint", pnl_est, f"Objectif BUY {target_tp:.5f} atteint !")
+        with STATE_LOCK:
+            STATE["active_trade"] = None
+            STATE["phase"] = "CLOTURE_REUSSIE"
+            STATE["phase_detail"] = f"Trade BUY terminé avec gain estimé: +{pnl_est:.2f} $"
+        log_event("TRADE_FERME", f"Take Profit BUY atteint à {cur_px:.5f} | PnL: +{pnl_est:.2f} $")
+    elif tr["direction"] == "SELL" and cur_px <= target_tp:
+        pnl_est = round(tr["stake_usd"] * tr["multiplier"] * ((tr["entry_price"] - cur_px) / tr["entry_price"]), 2)
+        record_trade_close(tr["id"], cur_px, "Take Profit Atteint", pnl_est, f"Objectif SELL {target_tp:.5f} atteint !")
+        with STATE_LOCK:
+            STATE["active_trade"] = None
+            STATE["phase"] = "CLOTURE_REUSSIE"
+            STATE["phase_detail"] = f"Trade SELL terminé avec gain estimé: +{pnl_est:.2f} $"
+        log_event("TRADE_FERME", f"Take Profit SELL atteint à {cur_px:.5f} | PnL: +{pnl_est:.2f} $")
         log_event("TAKE_PROFIT_ATTEINT", f"Contrat #{tr['contract_id']} clôturé au TP ({cur_px:.5f}) | Gain estimé: +{pnl_est}$")
         with STATE_LOCK:
             STATE["active_trade"] = None

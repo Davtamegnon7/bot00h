@@ -51,8 +51,12 @@ CFG = {
 }
 
 PUBLIC_WS_URLS = [
-    "wss://api.derivws.com/trading/v1/options/ws/public",
     "wss://ws.derivws.com/websockets/v3?app_id=1089",
+    "wss://blue.derivws.com/websockets/v3?app_id=1089",
+    "wss://green.derivws.com/websockets/v3?app_id=1089",
+    "wss://ws.binaryws.com/websockets/v3?app_id=1089",
+    "wss://frontend.binaryws.com/websockets/v3?app_id=1089",
+    "wss://api.derivws.com/trading/v1/options/ws/public",
 ]
 
 STATE_LOCK = threading.Lock()
@@ -662,6 +666,23 @@ def manage_active_trade(candles: list):
 
     cur_px = candles[-1]["close"]
     target_tp = plan["tp2"] if plan.get("tp1_is_support") or plan.get("tp1_is_resistance") else plan["tp1"]
+
+    # Calcul dynamique PnL estimé et distance à la cible
+    if tr["direction"] == "BUY":
+        pnl_est = round(tr["stake_usd"] * tr["multiplier"] * ((cur_px - tr["entry_price"]) / tr["entry_price"]), 2)
+        dist_pips = (target_tp - cur_px) / CFG["pip_size"]
+    else:
+        pnl_est = round(tr["stake_usd"] * tr["multiplier"] * ((tr["entry_price"] - cur_px) / tr["entry_price"]), 2)
+        dist_pips = (cur_px - target_tp) / CFG["pip_size"]
+
+    # Mise à jour constante du statut en cours sur le Dashboard
+    with STATE_LOCK:
+        STATE["phase"] = "TRADE_ACTIF"
+        STATE["phase_detail"] = (
+            f"Trade {tr['direction']} {tr['contract_type']} actif @ {tr['entry_price']:.5f} | "
+            f"Spot: {cur_px:.5f} | Cible TP: {target_tp:.5f} ({dist_pips:+.1f} pips) | "
+            f"PnL estimé: {pnl_est:+.2f} $"
+        )
 
     # 1. Vérification si TP atteint
     if tr["direction"] == "BUY" and cur_px >= target_tp:

@@ -350,7 +350,7 @@ def deriv_open_multiplier_contract(direction: str, entry_px: float, tp_px: float
     except Exception as e:
         log_event("ERREUR_ORDRE_DERIV", f"Exception ordre Deriv: {e}")
 
-    return (f"DERIV-DEMO-{int(time.time())}", entry_px)
+    return (None, 0.0)
 
 
 def check_deriv_active_contract(contract_id: str) -> dict:
@@ -415,8 +415,8 @@ def analyze_eur_us_session(candles: list, session_date: str) -> dict:
     height = highest_high - lowest_low
     height_pips = height / CFG["pip_size"]
 
-    if height_pips < 5.0:
-        return {"valid": False, "reason": f"Amplitude US trop faible ({height_pips:.1f} pips)"}
+    if height_pips < 10.0:
+        return {"valid": False, "reason": f"Amplitude US trop faible ({height_pips:.1f} pips < 10 pips requis)"}
 
     is_bear_session = (high_idx < low_idx)
     session_type = "BAISSE" if is_bear_session else "HAUSSE"
@@ -522,12 +522,24 @@ def step_eurusd_bot(now_dt: datetime):
                 STATE["phase_detail"] = f"Analyse 21h45 : {analysis.get('reason')}"
             return
 
+    # Pause maintenance broker Deriv quotidienne sur Forex (21h55 - 22h30 UTC)
+    if "21:55" <= hhmm < "22:30":
+        with STATE_LOCK:
+            STATE["phase_detail"] = "Pause maintenance quotidienne Deriv Forex (21h55 - 22h30 UTC). Reprise à 22h30."
+        return
+
     # D) Surveillance continue apres 21h45 UTC (si aucun trade n'est en cours)
     with STATE_LOCK:
         plan = STATE["plan"]
         active_tr = STATE["active_trade"]
 
     if plan and plan.get("session_date") == today_str and active_tr is None:
+        if plan.get("session_traded"):
+            with STATE_LOCK:
+                STATE["phase"] = "SESSION_TERMINEE"
+                STATE["phase_detail"] = f"Trade de la session {today_str} déjà complété. En attente de la prochaine session."
+            return
+
         last_bar = candles[-1]
         support = plan["support"]
         tp1 = plan["tp1"]
@@ -607,6 +619,12 @@ def execute_eur_order(direction: str, plan: dict, bar: dict, target_tp: float, r
         target_tp,
         sl_px=sl_px,
     )
+
+    if not cid or str(cid).startswith("DERIV-DEMO-"):
+        log_event("ORDRE_DERIV_REFUSE", f"Ordre {direction} refusé par Deriv (marché indisponible ou erreur).")
+        return
+
+    plan["session_traded"] = True
 
     tr = {
         "session_date": plan["session_date"],

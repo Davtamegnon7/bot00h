@@ -358,22 +358,39 @@ def deriv_open_multiplier_contract(direction: str, entry_px: float, tp_px: float
 
 
 def check_deriv_active_contract(contract_id: str) -> dict:
-    """Verifie le statut en cours du contrat via Deriv API."""
+    """Verifie le statut en cours ou clôturé du contrat via l'API Deriv (proposal_open_contract)."""
     acc_id = STATE.get("account_id") or CFG["deriv_demo_account"]
     ws_url = get_deriv_ws_url(acc_id)
     if not ws_url:
         return {}
     try:
         ws = websocket.create_connection(ws_url, timeout=12)
-        ws.send(json.dumps({"portfolio": 1}))
+        req = {"proposal_open_contract": 1}
+        try:
+            req["contract_id"] = int(contract_id)
+        except Exception:
+            req["contract_id"] = contract_id
+        ws.send(json.dumps(req))
         res = json.loads(ws.recv())
         ws.close()
-        contracts = res.get("portfolio", {}).get("contracts", [])
-        for c in contracts:
-            if str(c.get("contract_id")) == str(contract_id):
-                return c
-        return {"status": "CLOSED"}
-    except Exception:
+        poc = res.get("proposal_open_contract")
+        if poc:
+            is_sold = bool(poc.get("is_sold"))
+            profit = float(poc.get("profit", 0.0))
+            bid_px = float(poc.get("bid_price", 0.0))
+            sell_px = float(poc.get("sell_price", 0.0))
+            return {
+                "status": "CLOSED" if is_sold else "OPEN",
+                "is_sold": is_sold,
+                "profit": profit,
+                "bid_price": bid_px,
+                "sell_price": sell_px,
+                "entry_spot": poc.get("entry_spot"),
+                "exit_tick": poc.get("exit_tick"),
+            }
+        return {"status": "UNKNOWN"}
+    except Exception as e:
+        log_event("DERIV_CHECK_ERR", f"Erreur check_deriv_active_contract: {e}")
         return {}
 
 
@@ -481,9 +498,18 @@ def step_eurusd_bot(now_dt: datetime):
 
     cur_px = candles[-1]["close"]
 
-    # 2. Gestion de la phase horaire
+    # 2. Suivi prioritaire de tout trade actif (H24, peu importe l'heure !)
     with STATE_LOCK:
         active_tr = STATE["active_trade"]
+
+    if active_tr is not None:
+        manage_active_trade(candles)
+        with STATE_LOCK:
+            if STATE["active_trade"] is not None:
+                return
+
+    # 3. Gestion des phases horaires (Quand aucun trade n'est actif)
+    with STATE_LOCK:
         plan = STATE["plan"]
 
     # A) Avant 13h00 UTC : En attente
@@ -608,10 +634,6 @@ def step_eurusd_bot(now_dt: datetime):
                 execute_eur_order("SELL", plan, last_bar, target_tp, note)
                 return
 
-    # E) Suivi d'un trade actif
-    if active_tr is not None:
-        manage_active_trade(candles)
-
 
 def execute_eur_order(direction: str, plan: dict, bar: dict, target_tp: float, reason_note: str):
     entry_px = bar["close"]
@@ -664,8 +686,8 @@ def manage_active_trade(candles: list):
     if not tr:
         return
 
-    cur_px = candles[-1]["close"]
-    target_tp = plan["tp2"] if plan.get("tp1_is_support") or plan.get("tp1_is_resistance") else plan["tp1"]
+    cur_px = candles[-1]["close"] if candles else tr.get("entry_price", 1.0)
+    target_tp = tr.get("tp2_level") if (plan and plan.get("tp1_is_support")) else tr.get("tp1_level", tr.get("entry_price", 1.0))
 
     # Calcul dynamique PnL estimé et distance à la cible
     if tr["direction"] == "BUY":
@@ -684,7 +706,22 @@ def manage_active_trade(candles: list):
             f"PnL estimé: {pnl_est:+.2f} $"
         )
 
-    # 1. Vérification si TP atteint
+    # 1. Vérification prioritaire du statut officiel du contrat Deriv via WebSocket API
+    cid = tr.get("contract_id")
+    if cid and not str(cid).startswith("SIMU"):
+        info = check_deriv_active_contract(str(cid))
+        if info.get("status") == "CLOSED":
+            pnl_real = float(info.get("profit", pnl_est))
+            record_trade_close(tr["id"], cur_px, "Clôture Deriv Directe", pnl_real, f"Contrat #{cid} clôturé sur Deriv")
+            log_event("CLOTURE_DERIV", f"Contrat #{cid} fermé sur Deriv. PnL: {pnl_real:+.2f} $")
+            with STATE_LOCK:
+                STATE["active_trade"] = None
+                STATE["phase"] = "CLOTURE_REUSSIE" if pnl_real >= 0 else "CLOTURE_PERTE"
+                STATE["phase_detail"] = f"Dernier contrat fermé sur Deriv (PnL officiel: {pnl_real:+.2f} $)"
+            fetch_deriv_account()
+            return
+
+    # 2. Vérification par le spot si TP atteint (au cas où Deriv n'a pas encore validé)
     if tr["direction"] == "BUY" and cur_px >= target_tp:
         pnl_est = round(tr["stake_usd"] * tr["multiplier"] * ((cur_px - tr["entry_price"]) / tr["entry_price"]), 2)
         record_trade_close(tr["id"], cur_px, "Take Profit Atteint", pnl_est, f"Objectif BUY {target_tp:.5f} atteint !")
@@ -693,6 +730,8 @@ def manage_active_trade(candles: list):
             STATE["phase"] = "CLOTURE_REUSSIE"
             STATE["phase_detail"] = f"Trade BUY terminé avec gain estimé: +{pnl_est:.2f} $"
         log_event("TRADE_FERME", f"Take Profit BUY atteint à {cur_px:.5f} | PnL: +{pnl_est:.2f} $")
+        fetch_deriv_account()
+        return
     elif tr["direction"] == "SELL" and cur_px <= target_tp:
         pnl_est = round(tr["stake_usd"] * tr["multiplier"] * ((tr["entry_price"] - cur_px) / tr["entry_price"]), 2)
         record_trade_close(tr["id"], cur_px, "Take Profit Atteint", pnl_est, f"Objectif SELL {target_tp:.5f} atteint !")
@@ -701,27 +740,58 @@ def manage_active_trade(candles: list):
             STATE["phase"] = "CLOTURE_REUSSIE"
             STATE["phase_detail"] = f"Trade SELL terminé avec gain estimé: +{pnl_est:.2f} $"
         log_event("TRADE_FERME", f"Take Profit SELL atteint à {cur_px:.5f} | PnL: +{pnl_est:.2f} $")
-        log_event("TAKE_PROFIT_ATTEINT", f"Contrat #{tr['contract_id']} clôturé au TP ({cur_px:.5f}) | Gain estimé: +{pnl_est}$")
-        with STATE_LOCK:
-            STATE["active_trade"] = None
-            STATE["phase"] = "SURVEILLANCE_TERMINEE"
-            STATE["phase_detail"] = f"Trade gagnant clôturé au TP ({target_tp:.5f}) | Gain: +{pnl_est}$"
         fetch_deriv_account()
         return
 
-    # 2. Vérification du statut du contrat Deriv via WebSocket API
-    if tr.get("contract_id") and not str(tr["contract_id"]).startswith("SIMU"):
-        info = check_deriv_active_contract(tr["contract_id"])
-        if info.get("status") == "CLOSED":
-            # Le contrat s'est fermé sur TP ou SL sur Deriv
-            pnl_real = float(info.get("profit", 0.0))
-            record_trade_close(tr["id"], cur_px, "Clôture Deriv Directe", pnl_real, "Fermé sur Deriv")
-            log_event("CLOTURE_DERIV", f"Contrat #{tr['contract_id']} fermé sur Deriv. PnL: {pnl_real}$")
-            with STATE_LOCK:
-                STATE["active_trade"] = None
-                STATE["phase"] = "SURVEILLANCE_ACTIVE"
-                STATE["phase_detail"] = f"Dernier contrat fermé sur Deriv (PnL: {pnl_real:+.2f}$)"
-            fetch_deriv_account()
+
+def recover_active_trade_on_startup():
+    """Récupère un trade resté OPEN en base de données ou vérifie son statut sur Deriv au démarrage."""
+    init_db()
+    try:
+        con = sqlite3.connect(DB_PATH)
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+        cur.execute("SELECT * FROM eurusd_trades WHERE status = 'OPEN' ORDER BY id DESC LIMIT 1")
+        row = cur.fetchone()
+        con.close()
+
+        if not row:
+            return
+
+        cid = str(row["contract_id"]) if row["contract_id"] else ""
+        if cid and not cid.startswith("SIMU"):
+            info = check_deriv_active_contract(cid)
+            if info.get("status") == "CLOSED":
+                pnl_real = float(info.get("profit", 0.0))
+                record_trade_close(row["id"], float(row["entry_price"]), "Clôture Deriv hors ligne", pnl_real, "Réconciliation au démarrage")
+                log_event("RECONCILIATION_OFFLINE", f"Contrat #{cid} clôturé hors ligne sur Deriv (PnL: {pnl_real:+.2f} $)")
+                fetch_deriv_account()
+                return
+
+        # Si le contrat est toujours ouvert sur Deriv
+        tr = {
+            "id": row["id"],
+            "session_date": row["session_date"],
+            "symbol": row["symbol"],
+            "direction": row["direction"],
+            "contract_type": row["contract_type"],
+            "entry_price": row["entry_price"],
+            "support_level": row["support_level"],
+            "tp1_level": row["tp1_level"],
+            "tp2_level": row["tp2_level"],
+            "stake_usd": row["stake_usd"],
+            "multiplier": row["multiplier"],
+            "contract_id": cid,
+            "entry_time_utc": row["entry_time_utc"],
+            "notes": row["notes"] or "",
+        }
+        with STATE_LOCK:
+            STATE["active_trade"] = tr
+            STATE["phase"] = "TRADE_ACTIF"
+            STATE["phase_detail"] = f"Trade #{tr['id']} ({tr['direction']}) repris au démarrage @ {tr['entry_price']:.5f} (Contrat #{cid})"
+        log_event("REPRISE_TRADE", f"Position active reprise au démarrage: #{cid} ({tr['direction']} @ {tr['entry_price']:.5f})")
+    except Exception as e:
+        log_event("ERREUR_REPRISE", f"Exception lors de la reprise: {e}")
 
 
 # ==============================================================================
@@ -730,6 +800,7 @@ def manage_active_trade(candles: list):
 def bot_loop():
     log_event("DEMARRAGE", f"Bot Cloud EUR/USD actif sur Deriv Demo {CFG['deriv_demo_account']}")
     fetch_deriv_account()
+    recover_active_trade_on_startup()
 
     last_ping = 0.0
     while True:

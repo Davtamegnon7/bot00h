@@ -623,8 +623,8 @@ def check_active_xau_trade(now_dt: datetime, tr: dict, hhmm: str):
 
     cur_px = candles[-1]["close"]
 
-    # Évaluation à 00h30 UTC (30 minutes après minuit)
-    if hhmm == "00:30" and not tr.get("eval_done"):
+    # Évaluation à partir de 00h30 UTC (30 minutes après minuit)
+    if hhmm >= "00:30" and not tr.get("eval_done"):
         tr["eval_done"] = True
         entry = tr["entry_price"]
         tp = tr["tp_price"]
@@ -651,7 +651,7 @@ def check_active_xau_trade(now_dt: datetime, tr: dict, hhmm: str):
                 STATE["xau_status"] = f"PROLONGATION JUSQU'À 01h00 UTC ({eval_str})"
             log_event("XAU_00H", "PROLONGATION_1H", f"Trade {tr['direction']} prolongé jusqu'à 01h00 max ({eval_str}).")
         else:
-            finish_xau_trade(cur_px, "Sortie 30 Min (Filtres Non Validés)", f"Clôture à 00h30 : {eval_str}")
+            finish_xau_trade(cur_px, "Sortie 30 Min (Filtres Non Validés)", f"Clôture 00h30 : {eval_str}")
         return
 
     # Clôture impérative à 01h00 UTC (1 heure max)
@@ -684,12 +684,74 @@ def finish_xau_trade(exit_price: float, reason: str, detail: str, real_pnl: floa
     log_event("XAU_00H", "CLOTURE_TRADE", f"{tr['direction']} clôturé à {exit_price:.2f} ({reason}) | PnL = {pnl:+.2f} $ | {detail}")
 
 
+def recover_active_trade_on_startup():
+    init_db()
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+    cur.execute("SELECT * FROM trades WHERE strategy LIKE 'XAU%' AND exit_time_utc IS NULL ORDER BY id DESC LIMIT 1")
+    row = cur.fetchone()
+    con.close()
+
+    if not row:
+        return
+
+    ticket = str(row["ticket_id"]) if row["ticket_id"] is not None else ""
+    with MT5_LOCK:
+        if ticket and ticket.isdigit() and mt5 is not None and mt5.initialize():
+            positions = mt5.positions_get(ticket=int(ticket))
+            if not positions:
+                from_time = datetime.now() - timedelta(days=2)
+                deals = mt5.history_deals_get(from_time, datetime.now(), position=int(ticket))
+                exit_px = row["entry_price"]
+                pnl = 0.0
+                reason = "Clôture MT5 hors ligne (TP/SL/Externe)"
+                if deals:
+                    close_deal = deals[-1]
+                    exit_px = close_deal.price
+                    pnl = close_deal.profit
+                    reason = f"Clôture Deal MT5 #{close_deal.ticket}"
+                record_trade_close(row["id"], exit_px, reason, bool(row["extended"]), pnl, f"Réconciliation au démarrage | PnL={pnl:.2f}$")
+                log_event("XAU_00H", "RECONCILIATION_OFFLINE", f"Trade #{ticket} fermé hors ligne: {reason} @ {exit_px:.2f} (PnL={pnl:+.2f}$)")
+                return
+
+    tr = {
+        "db_id": row["id"],
+        "session_date": row["session_date"],
+        "strategy": row["strategy"],
+        "symbol": row["symbol"],
+        "mode": row["mode"],
+        "direction": row["direction"],
+        "candle_open": row["candle_open"],
+        "candle_high": row["candle_high"],
+        "candle_low": row["candle_low"],
+        "candle_close": row["candle_close"],
+        "level_low": row["level_low"],
+        "level_high": row["level_high"],
+        "entry_price": row["entry_price"],
+        "sl_price": row["sl_price"],
+        "tp_price": row["tp_price"],
+        "entry_time_utc": row["entry_time_utc"],
+        "entry_epoch": int(time.time()),
+        "lot_size": row["lot_size"],
+        "ticket_id": ticket,
+        "notes": row["notes"] or "",
+        "extended": bool(row["extended"]),
+        "eval_done": False,
+    }
+    with STATE_LOCK:
+        STATE["xau_active_trade"] = tr
+        STATE["xau_status"] = f"TRADE ACTIF (REPRIS) : {tr['direction']} {tr['lot_size']} lot @ {tr['entry_price']:.2f} (Ticket #{ticket})"
+    log_event("XAU_00H", "REPRISE_TRADE", f"Position active #{ticket} reprise avec succès au démarrage ({tr['direction']} @ {tr['entry_price']:.2f}).")
+
+
 # ==============================================================================
 # BOUCLE PRINCIPALE & SERVEUR WEB LOCAL
 # ==============================================================================
 def bot_loop():
     load_quant_brain_profile()
     ensure_mt5_connected()
+    recover_active_trade_on_startup()
     with STATE_LOCK:
         if STATE["mt5_connected"]:
             log_event(

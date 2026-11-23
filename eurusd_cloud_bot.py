@@ -44,19 +44,20 @@ CFG = {
     "deriv_demo_account": "DOT95087458",
     "symbol": "frxEURUSD",
     "symbol_label": "EUR/USD",
-    "stake_usd": float(os.environ.get("EUR_STAKE", "20.0")),
+    "initial_capital_usd": float(os.environ.get("INITIAL_CAPITAL", "100.0")),
+    "stake_usd": float(os.environ.get("EUR_STAKE", "2.0")),
     "multiplier": int(os.environ.get("EUR_MULTIPLIER", "100")),
     "tolerance_pips": float(os.environ.get("EUR_TOLERANCE_PIPS", "1.8")),  # 1.8 pips = 0.00018
     "pip_size": 0.0001,
 }
 
 PUBLIC_WS_URLS = [
-    "wss://ws.derivws.com/websockets/v3?app_id=1089",
+    "wss://api.derivws.com/trading/v1/options/ws/public",
     "wss://blue.derivws.com/websockets/v3?app_id=1089",
     "wss://green.derivws.com/websockets/v3?app_id=1089",
+    "wss://ws.derivws.com/websockets/v3?app_id=1089",
     "wss://ws.binaryws.com/websockets/v3?app_id=1089",
     "wss://frontend.binaryws.com/websockets/v3?app_id=1089",
-    "wss://api.derivws.com/trading/v1/options/ws/public",
 ]
 
 STATE_LOCK = threading.Lock()

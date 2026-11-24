@@ -47,7 +47,10 @@ CFG = {
     "initial_capital_usd": float(os.environ.get("INITIAL_CAPITAL", "100.0")),
     "stake_usd": float(os.environ.get("EUR_STAKE", "2.0")),
     "multiplier": int(os.environ.get("EUR_MULTIPLIER", "100")),
-    "tolerance_pips": float(os.environ.get("EUR_TOLERANCE_PIPS", "1.8")),  # 1.8 pips = 0.00018
+    "tolerance_pips": float(os.environ.get("EUR_TOLERANCE_PIPS", "0.8")),  # 0.8 pip calibré (+4 860 scénarios)
+    "sl_pips": float(os.environ.get("EUR_SL_PIPS", "15.0")),               # SL sécurisé 15 pips
+    "max_hold_hours": float(os.environ.get("EUR_MAX_HOLD_HOURS", "6.0")),  # Time-Stop 6 heures max
+    "exit_on_london_open": True,                                           # Sortie impérative avant Londres 06h00 UTC
     "pip_size": 0.0001,
 }
 
@@ -487,6 +490,37 @@ def check_deriv_active_contract(contract_id: str) -> dict:
         return {}
 
 
+def deriv_close_contract(contract_id: str) -> dict:
+    """Clôture manuellement un contrat multiplicateur via l'API Deriv (Time-Stop ou SL)."""
+    acc_id = STATE.get("account_id") or CFG["deriv_demo_account"]
+    ws_url = get_deriv_ws_url(acc_id)
+    if not ws_url:
+        return {"success": False, "error": "Pas d'OTP Deriv"}
+    try:
+        ws = websocket.create_connection(ws_url, timeout=12)
+        try:
+            cid = int(contract_id)
+        except Exception:
+            cid = contract_id
+        req = {"sell": cid, "price": 0}
+        ws.send(json.dumps(req))
+        res = json.loads(ws.recv())
+        ws.close()
+        sell_res = res.get("sell")
+        if sell_res:
+            sold_profit = float(sell_res.get("profit", 0.0))
+            log_event("DERIV_SELL_SUCCESS", f"Contrat #{cid} clôturé via API Deriv. PnL: {sold_profit:+.2f} $")
+            return {
+                "success": True,
+                "profit": sold_profit,
+                "sold_for": float(sell_res.get("sold_for", 0.0)),
+            }
+        return {"success": False, "error": str(res)}
+    except Exception as e:
+        log_event("DERIV_SELL_ERR", f"Erreur sell contrat #{contract_id}: {e}")
+        return {"success": False, "error": str(e)}
+
+
 # ==============================================================================
 # LOGIQUE STRATÉGIE EUR/USD (SESSION US 13H00 - 21H45 UTC)
 # ==============================================================================
@@ -737,7 +771,8 @@ def execute_eur_order(direction: str, plan: dict, bar: dict, target_tp: float, r
 
     entry_px = bar["close"]
     ctype = "MULTUP" if direction.upper() == "BUY" else "MULTDOWN"
-    sl_px = (plan["support"] - 0.0010) if direction == "BUY" else (plan.get("resistance", entry_px + 0.0010) + 0.0010)
+    sl_dist = CFG.get("sl_pips", 15.0) * CFG["pip_size"]  # 15 pips calibré
+    sl_px = (plan["support"] - sl_dist) if direction == "BUY" else (plan.get("resistance", entry_px + sl_dist) + sl_dist)
     cid, exec_px = deriv_open_multiplier_contract(
         direction,
         entry_px,
@@ -839,6 +874,52 @@ def manage_active_trade(candles: list):
             STATE["phase"] = "CLOTURE_REUSSIE"
             STATE["phase_detail"] = f"Trade SELL terminé avec gain estimé: +{pnl_est:.2f} $"
         log_event("TRADE_FERME", f"Take Profit SELL atteint à {cur_px:.5f} | PnL: +{pnl_est:.2f} $")
+        fetch_deriv_account()
+        return
+
+    # 3. Vérification du Time-Stop (6 heures max ou ouverture Londres 06h00 UTC)
+    now_utc = datetime.now(timezone.utc)
+    hhmm_utc = now_utc.strftime("%H:%M")
+    entry_time_str = tr.get("entry_time_utc", "")
+    time_stop_triggered = False
+    time_stop_reason = ""
+
+    if entry_time_str:
+        try:
+            clean_time = entry_time_str.replace(" UTC", "")
+            entry_dt = datetime.strptime(clean_time, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            hold_hours = (now_utc - entry_dt).total_seconds() / 3600.0
+            if hold_hours >= CFG.get("max_hold_hours", 6.0):
+                time_stop_triggered = True
+                time_stop_reason = f"Time-Stop 6h max atteint ({hold_hours:.1f}h de détention)"
+            elif CFG.get("exit_on_london_open", True) and "06:00" <= hhmm_utc < "12:00" and hold_hours >= 3.0:
+                time_stop_triggered = True
+                time_stop_reason = f"Sortie sécurité avant session de Londres ({hhmm_utc} UTC)"
+        except Exception:
+            pass
+
+    # 4. Vérification Stop Loss de sécurité (15 pips)
+    sl_dist = CFG.get("sl_pips", 15.0) * CFG["pip_size"]
+    sl_level = (tr.get("support_level", 0.0) - sl_dist) if tr["direction"] == "BUY" else (tr.get("entry_price", cur_px) + sl_dist)
+    sl_triggered = False
+    if tr["direction"] == "BUY" and cur_px <= sl_level:
+        sl_triggered = True
+    elif tr["direction"] == "SELL" and cur_px >= sl_level:
+        sl_triggered = True
+
+    if time_stop_triggered or sl_triggered:
+        close_reason = time_stop_reason if time_stop_triggered else f"Stop Loss Touché ({sl_level:.5f})"
+        pnl_real = pnl_est
+        if cid and not str(cid).startswith("SIMU"):
+            sell_res = deriv_close_contract(str(cid))
+            if sell_res.get("success"):
+                pnl_real = float(sell_res.get("profit", pnl_est))
+        record_trade_close(tr["id"], cur_px, close_reason, pnl_real, f"Clôture automatique : {close_reason}")
+        log_event("TIME_STOP_CLOTURE", f"Trade {tr['direction']} fermé à {cur_px:.5f} ({close_reason}) | PnL: {pnl_real:+.2f} $")
+        with STATE_LOCK:
+            STATE["active_trade"] = None
+            STATE["phase"] = "CLOTURE_REUSSIE" if pnl_real >= 0 else "CLOTURE_PERTE"
+            STATE["phase_detail"] = f"Trade clôturé ({close_reason} | PnL: {pnl_real:+.2f} $)"
         fetch_deriv_account()
         return
 

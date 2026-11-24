@@ -27,6 +27,11 @@ except ImportError:
     print("[ERREUR] Module websocket manquant. Installer avec: pip install websocket-client")
     sys.exit(1)
 
+try:
+    import xauusd_cloud_bot
+except Exception as _e_imp:
+    xauusd_cloud_bot = None
+
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
@@ -1542,11 +1547,44 @@ class CloudBotHTTPHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
+        if self.path in ("/gold", "/gold/", "/xau", "/xauusd", "/gold/dashboard"):
+            if xauusd_cloud_bot:
+                body = xauusd_cloud_bot.render_dashboard_html().encode("utf-8")
+            else:
+                body = b"<html><body><h1>Bot Gold Cloud en cours de chargement...</h1></body></html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if self.path in ("/gold/export/csv", "/xauusd_cloud_journal.csv"):
+            if xauusd_cloud_bot and os.path.exists(xauusd_cloud_bot.CSV_PATH):
+                with open(xauusd_cloud_bot.CSV_PATH, "rb") as f:
+                    content = f.read()
+            else:
+                content = b"id,session_date,symbol,direction,entry_price,tp_price,sl_price,exit_price,pnl_usd,exit_reason\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", 'attachment; filename="xauusd_cloud_journal.csv"')
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+            return
+
         if self.path == "/api/status":
             with STATE_LOCK:
                 st = dict(STATE)
                 st.pop("candles_m15", None)
-            body = json.dumps(st, indent=2, ensure_ascii=False).encode("utf-8")
+            if xauusd_cloud_bot:
+                with xauusd_cloud_bot.STATE_LOCK:
+                    st_gold = dict(xauusd_cloud_bot.STATE)
+                    st_gold.pop("candles_m15", None)
+                payload_data = {"eurusd": st, "xauusd": st_gold}
+            else:
+                payload_data = {"eurusd": st}
+            body = json.dumps(payload_data, indent=2, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -1583,12 +1621,22 @@ def main():
 
     init_db()
 
-    # Démarrage de la boucle du bot dans un thread
-    t = threading.Thread(target=bot_loop, daemon=True)
+    # Démarrage de la boucle EUR/USD dans un thread
+    t = threading.Thread(target=bot_loop, daemon=True, name="EURUSD_Cloud_Thread")
     t.start()
 
+    # Démarrage simultané du Bot Gold XAU/USD dans un thread
+    if xauusd_cloud_bot:
+        try:
+            xauusd_cloud_bot.init_db()
+            t_xau = threading.Thread(target=xauusd_cloud_bot.bot_loop, daemon=True, name="XAUUSD_Cloud_Thread")
+            t_xau.start()
+            log_event("SYSTEME", "XAU_ACTIF", "Bot Cloud XAU/USD Gold démarré simultanément avec succès")
+        except Exception as e_xau:
+            log_event("SYSTEME", "XAU_ERR", f"Erreur démarrage thread XAU: {e_xau}")
+
     srv = HTTPServer(("0.0.0.0", CFG["web_port"]), CloudBotHTTPHandler)
-    log_event("SERVEUR_WEB", f"Dashboard Cloud EUR/USD actif sur port {CFG['web_port']}")
+    log_event("SERVEUR_WEB", f"Dashboard Cloud Dual-Bot actif sur port {CFG['web_port']}")
     srv.serve_forever()
 
 

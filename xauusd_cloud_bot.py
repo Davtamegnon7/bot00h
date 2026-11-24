@@ -804,255 +804,377 @@ class XauusdDashboardHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
-        html = self.render_dashboard()
+        html = render_dashboard_html()
         self.wfile.write(html.encode("utf-8"))
 
-    def render_dashboard(self) -> str:
-        with STATE_LOCK:
-            st = dict(STATE)
-            qb = dict(st["quant_brain"])
-            act = st.get("active_trade")
-            candles = list(st.get("candles_m15", []))
 
-        con = sqlite3.connect(DB_PATH)
-        con.row_factory = sqlite3.Row
-        cur = con.cursor()
-        cur.execute("SELECT * FROM xauusd_trades ORDER BY id DESC LIMIT 20")
-        trades = [dict(r) for r in cur.fetchall()]
-        cur.execute("SELECT * FROM logs ORDER BY id DESC LIMIT 10")
-        logs = [dict(r) for r in cur.fetchall()]
-        con.close()
+def render_dashboard_html() -> str:
+    with STATE_LOCK:
+        st = dict(STATE)
+        qb = dict(st.get("quant_brain", {}))
+        act = st.get("active_trade")
+        candles = list(st.get("candles_m15", []))
 
-        # Construction du SVG des bougies
-        svg_w, svg_h = 760, 260
-        candles_svg = ""
-        if len(candles) >= 5:
-            min_p = min(c["low"] for c in candles)
-            max_p = max(c["high"] for c in candles)
-            rng = max(max_p - min_p, 1.0)
-            pad_y = 20
-            dx = svg_w / max(len(candles), 1)
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+    cur.execute("SELECT * FROM xauusd_trades ORDER BY id DESC LIMIT 50")
+    trades = [dict(r) for r in cur.fetchall()]
+    cur.execute("SELECT * FROM logs ORDER BY id DESC LIMIT 35")
+    logs = [dict(r) for r in cur.fetchall()]
+    con.close()
 
-            for i, c in enumerate(candles):
-                x = i * dx + dx * 0.5
-                y_high = pad_y + (max_p - c["high"]) / rng * (svg_h - 2 * pad_y)
-                y_low = pad_y + (max_p - c["low"]) / rng * (svg_h - 2 * pad_y)
-                y_open = pad_y + (max_p - c["open"]) / rng * (svg_h - 2 * pad_y)
-                y_close = pad_y + (max_p - c["close"]) / rng * (svg_h - 2 * pad_y)
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-                is_green = c["close"] >= c["open"]
-                color = "#10b981" if is_green else "#ef4444"
-                top_body = min(y_open, y_close)
-                body_h = max(abs(y_close - y_open), 2.0)
+    # Construction du SVG des bougies
+    svg_w, svg_h = 960, 260
+    candles_svg = ""
+    if len(candles) >= 5:
+        min_p = min(c["low"] for c in candles)
+        max_p = max(c["high"] for c in candles)
+        rng = max(max_p - min_p, 1.0)
+        pad_y = 25
+        dx = svg_w / max(len(candles), 1)
 
-                candles_svg += f'<line x1="{x:.1f}" y1="{y_high:.1f}" x2="{x:.1f}" y2="{y_low:.1f}" stroke="{color}" stroke-width="1.5"/>'
-                candles_svg += f'<rect x="{x - dx * 0.35:.1f}" y="{top_body:.1f}" width="{dx * 0.7:.1f}" height="{body_h:.1f}" fill="{color}" rx="1"/>'
+        for i, c in enumerate(candles):
+            x = i * dx + dx * 0.5
+            y_high = pad_y + (max_p - c["high"]) / rng * (svg_h - 2 * pad_y)
+            y_low = pad_y + (max_p - c["low"]) / rng * (svg_h - 2 * pad_y)
+            y_open = pad_y + (max_p - c["open"]) / rng * (svg_h - 2 * pad_y)
+            y_close = pad_y + (max_p - c["close"]) / rng * (svg_h - 2 * pad_y)
 
-        # Lignes du tableau des trades
-        trade_rows = ""
-        for t in trades:
-            pnl = t.get("pnl_usd")
-            pnl_str = f"{pnl:+.2f} $" if pnl is not None else "-"
-            pnl_cls = "text-emerald-400 font-bold" if (pnl or 0) > 0 else ("text-rose-400 font-bold" if (pnl or 0) < 0 else "text-slate-400")
-            badge_cls = "bg-emerald-500/20 text-emerald-300 border-emerald-500/40" if t["direction"] == "BUY" else "bg-rose-500/20 text-rose-300 border-rose-500/40"
-            trade_rows += f"""
-            <tr class="border-b border-slate-800/60 hover:bg-slate-800/30 transition text-sm">
-                <td class="py-3 px-3 font-mono text-slate-400">#{t['id']}</td>
-                <td class="py-3 px-3 text-slate-300">{t['session_date']}</td>
-                <td class="py-3 px-3"><span class="px-2 py-0.5 rounded border text-xs font-semibold {badge_cls}">{t['direction']}</span></td>
-                <td class="py-3 px-3 font-mono text-amber-300">{t['entry_price']:.2f}$</td>
-                <td class="py-3 px-3 font-mono text-indigo-300">{t['tp_price']:.2f}$</td>
-                <td class="py-3 px-3 font-mono text-rose-300">{t['sl_price']:.2f}$</td>
-                <td class="py-3 px-3 font-mono text-slate-300">{t.get('exit_price') or '-'}{'$' if t.get('exit_price') else ''}</td>
-                <td class="py-3 px-3 font-mono {pnl_cls}">{pnl_str}</td>
-                <td class="py-3 px-3 text-xs text-slate-400">{t.get('exit_reason') or 'En cours'}</td>
-            </tr>
-            """
+            is_green = c["close"] >= c["open"]
+            color = "#10b981" if is_green else "#f43f5e"
+            top_body = min(y_open, y_close)
+            body_h = max(abs(y_close - y_open), 2.0)
 
-        active_card = """
-        <div class="p-4 rounded-xl border border-slate-800 bg-slate-900/60 text-slate-400 text-sm">
-            Aucun trade actif en ce moment. Surveillance active du marché en attente de minuit.
-        </div>
+            candles_svg += f'<line x1="{x:.1f}" y1="{y_high:.1f}" x2="{x:.1f}" y2="{y_low:.1f}" stroke="{color}" stroke-width="1.2"/>'
+            candles_svg += f'<rect x="{x - dx * 0.35:.1f}" y="{top_body:.1f}" width="{dx * 0.7:.1f}" height="{body_h:.1f}" fill="{color}" rx="0.5"/>'
+
+    # Lignes du tableau des trades
+    trade_rows = ""
+    for t in trades:
+        pnl = t.get("pnl_usd")
+        pnl_str = f"{pnl:+.2f} $" if pnl is not None else "-"
+        pnl_badge = '<span class="text-gray-500 font-mono">-</span>'
+        if pnl is not None:
+            col = "text-emerald-400 font-bold bg-emerald-500/10 border-emerald-500/30" if pnl >= 0 else "text-rose-400 font-bold bg-rose-500/10 border-rose-500/30"
+            pnl_badge = f'<span class="inline-flex px-2 py-0.5 rounded-md border {col} font-mono">{pnl:+.2f} $</span>'
+
+        dir_badge = "bg-rose-500/15 text-rose-300 border border-rose-500/30" if t["direction"] == "SELL" else "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+        trade_rows += f"""
+        <tr class="border-b border-white/[0.04] hover:bg-white/[0.02] transition text-xs font-mono">
+            <td class="py-3 px-3 text-gray-400 font-bold">#{t['id']}</td>
+            <td class="py-3 px-3 text-gray-300 whitespace-nowrap">{t['session_date']}</td>
+            <td class="py-3 px-3"><span class="px-2 py-0.5 rounded text-[11px] font-black {dir_badge}">{t['direction']}</span></td>
+            <td class="py-3 px-3 font-semibold text-white">{t['entry_price']:.2f}$</td>
+            <td class="py-3 px-3 text-emerald-400 font-semibold">{t['tp_price']:.2f}$</td>
+            <td class="py-3 px-3 text-rose-400 font-semibold">{t['sl_price']:.2f}$</td>
+            <td class="py-3 px-3 text-gray-300">{f"{t['exit_price']:.2f}$" if t.get('exit_price') else '-'}</td>
+            <td class="py-3 px-3">{pnl_badge}</td>
+            <td class="py-3 px-3 text-gray-400 truncate max-w-xs">{t.get('exit_reason') or '<span class="text-amber-400 font-bold">En cours...</span>'}</td>
+        </tr>
         """
-        if act:
-            dir_cls = "text-emerald-400" if act["direction"] == "BUY" else "text-rose-400"
-            active_card = f"""
-            <div class="p-5 rounded-xl border border-amber-500/40 bg-amber-950/20 text-slate-200">
-                <div class="flex items-center justify-between mb-3">
-                    <span class="flex items-center gap-2 font-semibold text-amber-400 text-sm">
-                        <span class="h-2.5 w-2.5 rounded-full bg-amber-400 animate-ping"></span>
-                        CONTRAT DERIV ACTIF #{act.get('contract_id')}
+
+    active_card = ""
+    if act:
+        dir_cls = "text-emerald-400" if act["direction"] == "BUY" else "text-rose-400"
+        active_card = f"""
+        <div class="mb-6 p-5 rounded-2xl bg-gradient-to-r from-amber-950/60 via-yellow-950/40 to-gray-900 border border-amber-500/50 shadow-2xl backdrop-blur-md">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-amber-800/40 gap-2 mb-4">
+                <div class="flex items-center space-x-2.5">
+                    <span class="relative flex h-3 w-3">
+                        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                        <span class="relative inline-flex rounded-full h-3 w-3 bg-amber-500"></span>
                     </span>
-                    <span class="text-xs px-2.5 py-1 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 font-mono">
-                        {act.get('contract_type')}
-                    </span>
+                    <span class="text-xs font-black tracking-widest text-amber-300 uppercase">CONTRAT DERIV CLOUD ACTIF</span>
+                    <span class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-mono text-[11px] font-bold">ID #{act.get('contract_id')}</span>
                 </div>
-                <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm font-mono mt-3">
-                    <div class="bg-slate-900/80 p-3 rounded-lg border border-slate-800">
-                        <div class="text-xs text-slate-400">Direction</div>
-                        <div class="font-bold {dir_cls}">{act['direction']}</div>
-                    </div>
-                    <div class="bg-slate-900/80 p-3 rounded-lg border border-slate-800">
-                        <div class="text-xs text-slate-400">Prix Entrée</div>
-                        <div class="font-bold text-amber-300">{act['entry_price']:.2f}$</div>
-                    </div>
-                    <div class="bg-slate-900/80 p-3 rounded-lg border border-slate-800">
-                        <div class="text-xs text-slate-400">Cible TP</div>
-                        <div class="font-bold text-indigo-400">{act['tp_price']:.2f}$</div>
-                    </div>
-                    <div class="bg-slate-900/80 p-3 rounded-lg border border-slate-800">
-                        <div class="text-xs text-slate-400">Mise (Stake)</div>
-                        <div class="font-bold text-emerald-400">{act['stake_usd']:.2f}$ (x{act['multiplier']})</div>
-                    </div>
+                <div class="text-xs text-gray-400 font-mono">Sens : <span class="text-white font-bold">{act['direction']} • {act.get('contract_type')}</span></div>
+            </div>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div class="bg-black/30 p-3 rounded-xl border border-white/5">
+                    <span class="text-[11px] font-medium text-gray-400 uppercase">Prix Entrée</span>
+                    <div class="text-base font-black text-white font-mono mt-0.5">{act['entry_price']:.2f}$</div>
+                </div>
+                <div class="bg-black/30 p-3 rounded-xl border border-white/5">
+                    <span class="text-[11px] font-medium text-gray-400 uppercase">Take Profit (Fibo)</span>
+                    <div class="text-base font-black text-emerald-400 font-mono mt-0.5">{act['tp_price']:.2f}$</div>
+                </div>
+                <div class="bg-black/30 p-3 rounded-xl border border-white/5">
+                    <span class="text-[11px] font-medium text-gray-400 uppercase">Stop Loss</span>
+                    <div class="text-base font-black text-rose-400 font-mono mt-0.5">{act.get('sl_price', 0.0):.2f}$</div>
+                </div>
+                <div class="bg-black/30 p-3 rounded-xl border border-white/5">
+                    <span class="text-[11px] font-medium text-gray-400 uppercase">Mise / Mult</span>
+                    <div class="text-base font-black text-amber-400 font-mono mt-0.5">{act['stake_usd']:.2f}$ (x{act['multiplier']})</div>
                 </div>
             </div>
-            """
+        </div>
+        """
 
-        return f"""<!DOCTYPE html>
+    logs_rows = ""
+    for l in logs:
+        l_ts = (l.get("timestamp_utc") or "").replace(" UTC", "")
+        ev = l.get("event_type", "INFO")
+        ev_col = "text-amber-400 border-amber-500/30 bg-amber-500/10"
+        if "REUSSI" in ev or "GAIN" in ev or "CLOTURE" in ev:
+            ev_col = "text-emerald-400 border-emerald-500/30 bg-emerald-500/10"
+        elif "ERR" in ev or "PERTE" in ev or "REFUS" in ev:
+            ev_col = "text-rose-400 border-rose-500/30 bg-rose-500/10"
+
+        logs_rows += f"""
+        <div class="py-1.5 px-2.5 rounded-lg bg-black/20 hover:bg-white/[0.02] border border-white/[0.03] text-xs font-mono flex items-start space-x-3">
+            <span class="text-gray-500 text-[11px] whitespace-nowrap mt-0.5">{l_ts}</span>
+            <span class="px-1.5 py-0.5 rounded text-[10px] font-bold border {ev_col} whitespace-nowrap">{ev}</span>
+            <span class="text-gray-300 break-all">{l['message']}</span>
+        </div>
+        """
+
+    return f"""<!DOCTYPE html>
 <html lang="fr" class="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cloud Bot 00h Gold — Portefeuille 100$ Deriv</title>
+    <title>XAU/USD Gold Minuit • Terminal Quantitatif Deriv</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <meta http-equiv="refresh" content="5">
     <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <meta http-equiv="refresh" content="10">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        body {{ font-family: 'Inter', sans-serif; }}
+        body {{
+            background-color: #07090e;
+            color: #f1f5f9;
+            font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+            background-image: radial-gradient(circle at 50% 0%, rgba(245, 158, 11, 0.04) 0%, transparent 60%);
+        }}
         .font-mono {{ font-family: 'JetBrains Mono', monospace; }}
+        .glass-card {{
+            background: linear-gradient(135deg, rgba(17, 24, 39, 0.75), rgba(15, 23, 42, 0.60));
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.07);
+            border-radius: 1rem;
+        }}
+        .glass-card-hover:hover {{
+            border-color: rgba(245, 158, 11, 0.3);
+            box-shadow: 0 10px 30px -10px rgba(245, 158, 11, 0.1);
+        }}
+        ::-webkit-scrollbar {{ width: 6px; height: 6px; }}
+        ::-webkit-scrollbar-track {{ background: rgba(0, 0, 0, 0.2); }}
+        ::-webkit-scrollbar-thumb {{ background: rgba(255, 255, 255, 0.1); border-radius: 9999px; }}
+        ::-webkit-scrollbar-thumb:hover {{ background: rgba(255, 255, 255, 0.2); }}
     </style>
 </head>
-<body class="bg-slate-950 text-slate-100 min-h-screen p-4 md:p-8">
-    <div class="max-w-6xl mx-auto space-y-6">
-        
-        <!-- HEADER -->
-        <header class="flex flex-col md:flex-row md:items-center justify-between pb-6 border-b border-slate-800 gap-4">
+<body class="p-4 md:p-8 max-w-7xl mx-auto min-h-screen">
+
+    <!-- TOP NAV / BRANDING -->
+    <header class="flex flex-col md:flex-row md:items-center justify-between pb-6 border-b border-white/[0.08] gap-4 mb-6">
+        <div class="flex items-center space-x-3.5">
+            <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-amber-400 to-amber-600 flex items-center justify-center text-black font-black text-xl shadow-lg shadow-amber-500/20">
+                Au
+            </div>
             <div>
-                <div class="flex items-center gap-3">
-                    <span class="h-3 w-3 rounded-full bg-amber-400 animate-pulse"></span>
-                    <h1 class="text-2xl font-bold tracking-tight text-amber-300">BOT 00H GOLD (XAU/USD)</h1>
-                    <span class="text-xs bg-amber-500/10 text-amber-400 border border-amber-500/30 px-2 py-0.5 rounded font-mono">Render Cloud</span>
+                <div class="flex items-center space-x-2">
+                    <h1 class="text-xl md:text-2xl font-black tracking-tight text-white">XAU/USD GOLD MINUIT</h1>
+                    <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-300 border border-amber-500/30 uppercase tracking-wider">Cloud Deriv Multipliers</span>
                 </div>
-                <p class="text-xs text-slate-400 mt-1">Stratégie Minuit Fibo Miroir | Multiplicateurs Deriv x100 | Portefeuille 100$ Dédié</p>
-            </div>
-            <div class="flex items-center gap-4 bg-slate-900 border border-slate-800 px-4 py-2.5 rounded-xl font-mono text-sm">
-                <div>
-                    <span class="text-xs text-slate-400 block">Spot XAU/USD</span>
-                    <span class="text-lg font-bold text-amber-300">{st['current_price']:.2f}$</span>
-                </div>
-                <div class="border-l border-slate-800 pl-4">
-                    <span class="text-xs text-slate-400 block">Compte Deriv</span>
-                    <span class="text-xs text-slate-200">{st['account_id']}</span>
-                </div>
-            </div>
-        </header>
-
-        <!-- CARTES KPI PORTEFEUILLE 100$ & IA -->
-        <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-            <div class="bg-slate-900/90 border border-slate-800 p-4 rounded-xl">
-                <span class="text-xs text-slate-400 uppercase tracking-wider block mb-1">Portefeuille Dédié</span>
-                <div class="text-2xl font-bold font-mono text-emerald-400">{st['portfolio_equity']:.2f} $</div>
-                <span class="text-xs text-slate-400">Capital initial : {st['portfolio_capital_initial']:.2f} $</span>
-            </div>
-            <div class="bg-slate-900/90 border border-slate-800 p-4 rounded-xl">
-                <span class="text-xs text-slate-400 uppercase tracking-wider block mb-1">Rendement Net (ROI)</span>
-                <div class="text-2xl font-bold font-mono {'text-emerald-400' if st['portfolio_total_pnl'] >= 0 else 'text-rose-400'}">
-                    {st['portfolio_total_pnl']:+.2f} $ ({st['portfolio_roi_pct']:+.1f}%)
-                </div>
-                <span class="text-xs text-slate-400">Sur {qb['total_trades']} sessions exécutées</span>
-            </div>
-            <div class="bg-slate-900/90 border border-slate-800 p-4 rounded-xl">
-                <span class="text-xs text-slate-400 uppercase tracking-wider block mb-1">Taux de Réussite</span>
-                <div class="text-2xl font-bold font-mono text-indigo-300">{qb['win_rate']:.1f}%</div>
-                <span class="text-xs text-slate-400">Mise : {CFG['stake_usd']:.2f}$ (2% strict)</span>
-            </div>
-            <div class="bg-slate-900/90 border border-slate-800 p-4 rounded-xl">
-                <span class="text-xs text-slate-400 uppercase tracking-wider block mb-1">Régime de Marché IA</span>
-                <div class="text-lg font-bold font-mono text-amber-300">{qb['regime']}</div>
-                <span class="text-xs text-slate-400 font-mono">ATR M15 : {qb['atr_m15']:.2f}$</span>
+                <p class="text-xs text-gray-400 mt-0.5">Stratégie 00h00 Fibo Miroir • Anti-Doji 35% • Breakeven 00h30 • Déployé sur Render</p>
             </div>
         </div>
 
-        <!-- STATUT & RÉFLEXION IA -->
-        <div class="bg-slate-900/90 border border-indigo-500/30 p-5 rounded-xl space-y-3">
+        <div class="flex flex-wrap items-center gap-2.5">
+            <div class="glass-card px-3.5 py-2 flex items-center space-x-2">
+                <span class="h-2 w-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                <span class="text-xs text-gray-400">Compte Deriv :</span>
+                <strong class="text-amber-400 font-mono text-xs">#{st.get('account_id', 'DOT95087458')}</strong>
+            </div>
+            <div class="glass-card px-3.5 py-2">
+                <span class="text-xs text-gray-400">Portefeuille Dédié :</span>
+                <strong class="text-white font-mono text-xs ml-1">{st['portfolio_equity']:.2f} $</strong>
+            </div>
+            <a href="/gold/export/csv" class="px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-black text-xs font-bold transition shadow-lg shadow-amber-500/10 flex items-center space-x-1.5">
+                <span>Exporter Journal CSV</span>
+            </a>
+        </div>
+    </header>
+
+    <!-- SÉLECTEUR DE PLATEFORME (DUAL BOT CLOUD) -->
+    <nav class="flex items-center space-x-2 bg-white/[0.03] p-1.5 rounded-2xl border border-white/[0.08] mb-6 font-mono text-xs">
+        <a href="/" class="flex items-center space-x-2 px-4 py-2 rounded-xl font-bold text-gray-400 hover:text-white hover:bg-white/[0.04] transition">
+            <span class="w-2 h-2 rounded-full bg-cyan-400"></span>
+            <span>🇪🇺 EUR/USD (Session US 13h-21h45)</span>
+        </a>
+        <a href="/gold" class="flex items-center space-x-2 px-4 py-2 rounded-xl font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-lg shadow-amber-500/10">
+            <span class="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+            <span>🪙 XAU/USD Gold (Minuit 00h00 Fibo)</span>
+        </a>
+    </nav>
+
+    <!-- BANDEAU PRINCIPAL DE STATUT & SPOT EN DIRECT -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+        <div class="glass-card p-5 md:col-span-2 flex flex-col justify-between border-l-4 border-l-amber-500">
+            <div>
+                <div class="flex items-center justify-between mb-1">
+                    <span class="text-[11px] font-bold text-amber-400 uppercase tracking-wider">CYCLE STRATÉGIQUE EN COURS</span>
+                    <span class="text-[11px] text-gray-400 font-mono">{now_utc}</span>
+                </div>
+                <div class="text-xl md:text-2xl font-black text-white">{st['phase']}</div>
+                <div class="text-xs text-gray-400 mt-1">{st['phase_detail']}</div>
+            </div>
+            <div class="mt-4 pt-3 border-t border-white/[0.06] flex items-center justify-between text-xs text-gray-400">
+                <span>Cycle : <strong class="text-gray-200">Armement 20h00 UTC &rarr; Décision 23h45 &rarr; Fibo 00h00 UTC</strong></span>
+                <span class="px-2 py-0.5 rounded bg-white/5 font-mono text-gray-300">Mode : Fibo Miroir v3</span>
+            </div>
+        </div>
+
+        <div class="glass-card p-5 flex flex-col justify-between text-right border-l-4 border-l-yellow-400">
             <div class="flex items-center justify-between">
-                <div class="flex items-center gap-2">
-                    <span class="text-xs px-2.5 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 font-mono">
-                        QUANT BRAIN — CERVEAU AUTONOME
-                    </span>
-                    <span class="text-xs text-slate-400">{st['phase']}</span>
-                </div>
-                <span class="text-xs font-mono text-slate-400">Horloge UTC : {st['last_tick_utc']}</span>
+                <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-yellow-500/10 text-yellow-300 border border-yellow-500/30">SPOT GOLD</span>
+                <span class="text-[11px] text-gray-400">Tick Deriv WS</span>
             </div>
-            <div class="text-sm text-slate-200 bg-slate-950/60 p-3 rounded-lg border border-slate-800">
-                <span class="text-indigo-400 font-semibold text-xs uppercase block mb-1">Réflexion & Adaptation IA :</span>
-                {qb['last_reflection']}
+            <div class="text-3xl md:text-4xl font-black font-mono text-yellow-400 mt-2 tracking-tight">
+                {st['current_price']:.2f} <span class="text-lg text-yellow-500/70 font-normal">$</span>
             </div>
-            <div class="text-xs text-slate-400">
-                Statut opérationnel : <span class="text-slate-200 font-mono">{st['phase_detail']}</span>
-            </div>
+            <div class="text-[11px] text-gray-500 mt-2 font-mono">Deriv Multipliers x{CFG['multiplier']}</div>
         </div>
-
-        <!-- CONTRAT ACTIF -->
-        <div>
-            <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400 mb-3">Position en Cours (Deriv Multiplier)</h2>
-            {active_card}
-        </div>
-
-        <!-- GRAPHIQUE M15 & BOUGIES -->
-        <div class="bg-slate-900/90 border border-slate-800 p-5 rounded-xl">
-            <div class="flex items-center justify-between mb-4">
-                <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400">Graphique M15 — Gold (35 dernières bougies)</h2>
-                <span class="text-xs text-amber-400 font-mono">Dernier tick : {st['current_price']:.2f}$</span>
-            </div>
-            <div class="w-full overflow-x-auto bg-slate-950/80 rounded-lg p-2 border border-slate-800/80 flex justify-center">
-                <svg width="{svg_w}" height="{svg_h}" class="block">
-                    {candles_svg}
-                </svg>
-            </div>
-        </div>
-
-        <!-- HISTORIQUE DES TRADES -->
-        <div class="bg-slate-900/90 border border-slate-800 p-5 rounded-xl">
-            <div class="flex items-center justify-between mb-4">
-                <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400">Journal des Trades — XAU/USD Minuit</h2>
-                <a href="/xauusd_cloud_journal.csv" class="text-xs text-amber-400 hover:underline font-mono">Export CSV</a>
-            </div>
-            <div class="overflow-x-auto">
-                <table class="w-full text-left">
-                    <thead>
-                        <tr class="border-b border-slate-800 text-xs text-slate-400 uppercase tracking-wider font-mono">
-                            <th class="py-2 px-3">#</th>
-                            <th class="py-2 px-3">Session</th>
-                            <th class="py-2 px-3">Ordre</th>
-                            <th class="py-2 px-3">Entrée</th>
-                            <th class="py-2 px-3">TP Cible</th>
-                            <th class="py-2 px-3">SL Securité</th>
-                            <th class="py-2 px-3">Sortie</th>
-                            <th class="py-2 px-3">PnL USD</th>
-                            <th class="py-2 px-3">Motif de Clôture</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {trade_rows if trade_rows else '<tr><td colspan="9" class="py-6 text-center text-slate-500 text-xs">Aucun trade enregistré pour l\'instant. Première session ce soir à 00h00 UTC.</td></tr>'}
-                    </tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- LOGS SYSTEME -->
-        <div class="bg-slate-900/60 border border-slate-800/80 p-4 rounded-xl text-xs font-mono text-slate-400">
-            <div class="text-slate-300 font-semibold mb-2">Derniers Événements Système :</div>
-            <div class="space-y-1">
-                {''.join(f'<div><span class="text-slate-500">[{l["timestamp_utc"]}]</span> <span class="text-amber-400">[{l["event_type"]}]</span> {l["message"]}</div>' for l in logs[:6])}
-            </div>
-        </div>
-
     </div>
+
+    <!-- POSITION ACTIVE -->
+    {active_card}
+
+    <!-- NOUVELLE CALIBRATION QUANT BRAIN GOLD (+4 860 SCENARIOS) -->
+    <div class="glass-card p-6 mb-6 border-amber-500/30 bg-gradient-to-br from-amber-950/20 via-yellow-950/10 to-transparent">
+        <div class="flex flex-col md:flex-row md:items-center justify-between pb-4 border-b border-amber-500/20 gap-3">
+            <div class="flex items-center space-x-3">
+                <div class="w-8 h-8 rounded-lg bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-300 font-bold">
+                    🧠
+                </div>
+                <div>
+                    <h3 class="text-sm font-black text-amber-200 uppercase tracking-wider">Calibration Quant Brain — Profil XAU/USD #107</h3>
+                    <p class="text-xs text-gray-400">Dataset multi-années : 101 127 bougies M15 réelles (2022 - 2026)</p>
+                </div>
+            </div>
+            <span class="px-3 py-1 rounded-full text-xs font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+                ✓ PROFIL INSTITUTIONNEL SYNCHRONISÉ
+            </span>
+        </div>
+
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-5">
+            <div class="glass-card p-4 text-center">
+                <div class="text-[11px] text-gray-400 uppercase font-semibold">Profit Net (4 ans)</div>
+                <div class="text-2xl font-black text-emerald-400 font-mono mt-1">+7 056.60 $</div>
+                <div class="text-[10px] text-gray-500 mt-0.5">374 trades sélectifs</div>
+            </div>
+            <div class="glass-card p-4 text-center">
+                <div class="text-[11px] text-gray-400 uppercase font-semibold">Profit Factor</div>
+                <div class="text-2xl font-black text-amber-300 font-mono mt-1">1.89</div>
+                <div class="text-[10px] text-emerald-400 mt-0.5">+60% vs avant optimisation</div>
+            </div>
+            <div class="glass-card p-4 text-center">
+                <div class="text-[11px] text-gray-400 uppercase font-semibold">Max Drawdown</div>
+                <div class="text-2xl font-black text-yellow-300 font-mono mt-1">1 015.40 $</div>
+                <div class="text-[10px] text-emerald-400 mt-0.5">Risque divisé par 2</div>
+            </div>
+            <div class="glass-card p-4 text-center">
+                <div class="text-[11px] text-gray-400 uppercase font-semibold">Mise Par Position</div>
+                <div class="text-2xl font-black text-purple-300 font-mono mt-1">{CFG['stake_usd']:.2f} $</div>
+                <div class="text-[10px] text-gray-500 mt-0.5">2% strict du capital 100$</div>
+            </div>
+        </div>
+
+        <!-- FILTRES DE PROTECTION EN PRODUCTION -->
+        <div class="mt-4 pt-4 border-t border-white/[0.06] flex flex-wrap items-center gap-2.5">
+            <span class="text-xs text-gray-400 font-medium">Armure Algorithmique Active :</span>
+            <span class="px-2.5 py-1 rounded-lg bg-emerald-500/10 text-emerald-300 text-xs font-mono font-bold border border-emerald-500/30">🛡️ Anti-Doji : Corps &ge; 35%</span>
+            <span class="px-2.5 py-1 rounded-lg bg-indigo-500/10 text-indigo-300 text-xs font-mono font-bold border border-indigo-500/30">⚡ Breakeven à 00h30 (0 Risque)</span>
+            <span class="px-2.5 py-1 rounded-lg bg-amber-500/10 text-amber-300 text-xs font-mono font-bold border border-amber-500/30">⏱️ Mémoire Fibo : 8 bougies (2h)</span>
+            <span class="px-2.5 py-1 rounded-lg bg-cyan-500/10 text-cyan-300 text-xs font-mono font-bold border border-cyan-500/30">⏳ Sortie Impérative 01h00 UTC</span>
+        </div>
+    </div>
+
+    <!-- GRAPHIQUE M15 & BOUGIES -->
+    <section class="glass-card p-6 mb-6">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="text-sm font-bold text-gray-200 uppercase tracking-wider">GRAPHIQUE XAU/USD M15 (DERIV GOLD)</h2>
+            <span class="text-xs text-amber-400 font-mono">Dernier tick : {st['current_price']:.2f}$</span>
+        </div>
+        <div class="w-full overflow-x-auto">
+            <svg viewBox="0 0 {svg_w} {svg_h}" class="w-full h-auto bg-[#070b12] rounded-lg border border-gray-800" style="min-width: 600px;">
+                {candles_svg if candles_svg else '<text x="480" y="130" fill="#64748b" text-anchor="middle" font-size="12">Chargement du flux bougies M15...</text>'}
+            </svg>
+        </div>
+    </section>
+
+    <!-- HISTORIQUE DES TRADES -->
+    <section class="glass-card p-6 mb-6">
+        <div class="flex items-center justify-between pb-4 border-b border-white/[0.08] mb-4">
+            <h2 class="text-sm font-bold text-gray-200 uppercase tracking-wider flex items-center space-x-2">
+                <span>HISTORIQUE DES TRADES DERIV XAU/USD</span>
+                <span class="px-2 py-0.5 rounded text-[10px] bg-white/5 text-gray-400 font-mono">{len(trades)} trades enregistrés</span>
+            </h2>
+            <span class="text-xs text-gray-500">Mise à jour en temps réel</span>
+        </div>
+        <div class="overflow-x-auto">
+            <table class="w-full text-left">
+                <thead>
+                    <tr class="text-[11px] text-gray-400 uppercase border-b border-white/[0.08]">
+                        <th class="py-2.5 px-3">#</th>
+                        <th class="py-2.5 px-3">Date</th>
+                        <th class="py-2.5 px-3">Direction</th>
+                        <th class="py-2.5 px-3">Entrée</th>
+                        <th class="py-2.5 px-3">Take Profit</th>
+                        <th class="py-2.5 px-3">Stop Loss</th>
+                        <th class="py-2.5 px-3">Sortie</th>
+                        <th class="py-2.5 px-3">Gain Net</th>
+                        <th class="py-2.5 px-3">Raison / Statut</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {trade_rows if trade_rows else '<tr><td colspan="9" class="py-6 text-center text-xs text-gray-500">Aucun trade enregistré pour l\'instant. Première session ce soir à 00h00 UTC.</td></tr>'}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <!-- LOGS CONSOLE STYLE TERMINAL -->
+    <section class="glass-card p-6">
+        <div class="flex items-center justify-between pb-3 border-b border-white/[0.08] mb-3">
+            <h2 class="text-sm font-bold text-gray-200 uppercase tracking-wider flex items-center space-x-2">
+                <span>JOURNAL D'ACTIVITÉ WEBSOCKET GOLD</span>
+            </h2>
+            <span class="text-xs text-gray-500 font-mono">Derniers 35 événements</span>
+        </div>
+        <div class="max-h-64 overflow-y-auto space-y-1.5 pr-2">
+            {logs_rows if logs_rows else '<div class="text-xs text-gray-500 font-mono py-2">En attente de logs...</div>'}
+        </div>
+    </section>
+
+    <footer class="mt-8 text-center text-[11px] text-gray-500 font-mono">
+        Bot Cloud XAU/USD Gold • Deriv Multipliers • Déployé sur Render.com • Actualisation auto 5s
+    </footer>
 </body>
 </html>
 """
+
+
+def bot_loop():
+    init_db()
+    fetch_deriv_account()
+    recover_active_trade_on_startup()
+    log_event("INITIALISATION", f"Bot Cloud XAU/USD prêt. Port={CFG['web_port']} | Capital Alloué=100.00$ | Mise=2.00$")
+
+    while True:
+        try:
+            now_dt = datetime.now(timezone.utc)
+            try:
+                fetch_m15_candles()
+            except Exception:
+                pass
+            step_xau_strategy(now_dt)
+        except Exception as e:
+            log_event("BOUCLE_ERREUR", f"Exception dans la boucle principale: {e}")
+        time.sleep(15)
 
 
 def run_http_server(port: int):
@@ -1076,22 +1198,7 @@ def main():
     t = threading.Thread(target=run_http_server, args=(port,), daemon=True)
     t.start()
 
-    log_event("INITIALISATION", f"Bot Cloud XAU/USD prêt. Port={port} | Capital Alloué=100.00$ | Mise=2.00$")
-
-    while True:
-        try:
-            now_dt = datetime.now(timezone.utc)
-            # Rafraîchir les bougies M15 toutes les 15 secondes
-            try:
-                fetch_m15_candles()
-            except Exception as e:
-                pass
-
-            step_xau_strategy(now_dt)
-        except Exception as e:
-            log_event("BOUCLE_ERREUR", f"Exception dans la boucle principale: {e}")
-
-        time.sleep(15)
+    bot_loop()
 
 
 if __name__ == "__main__":

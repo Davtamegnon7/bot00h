@@ -1,0 +1,93 @@
+{
+  "updated_at_utc": "2026-11-24 11:33:05 UTC",
+  "multi_year_dataset": {
+    "xau_candles_analyzed": 101127,
+    "eur_candles_analyzed": 100329,
+    "timespan": "2022 -> 2026 (4+ annees)",
+    "total_scenarios_evaluated": 4860
+  },
+  "xauusd_calibrated": {
+    "lookback": 8,
+    "sl_buffer": 0.5,
+    "mode": "miroir",
+    "smart_ext": false,
+    "ema_trend_filter": "counter_trend",
+    "min_body_ratio": 0.35,
+    "breakeven_30m": true,
+    "total_trades": 374,
+    "win_rate": 36.9,
+    "profit_factor": 1.89,
+    "net_profit_usd": 7056.6,
+    "max_drawdown_usd": 1015.4,
+    "yearly": {
+      "2022": {
+        "trades": 28,
+        "win_rate": 28.6,
+        "net_pnl": -122.2
+      },
+      "2023": {
+        "trades": 86,
+        "win_rate": 34.9,
+        "net_pnl": -186.2
+      },
+      "2024": {
+        "trades": 81,
+        "win_rate": 39.5,
+        "net_pnl": 402.8
+      },
+      "2025": {
+        "trades": 74,
+        "win_rate": 39.2,
+        "net_pnl": 557.2
+      },
+      "2026": {
+        "trades": 105,
+        "win_rate": 37.1,
+        "net_pnl": 6405.0
+      }
+    },
+    "score": 9292.73
+  },
+  "eurusd_calibrated": {
+    "tolerance_pips": 0.8,
+    "confirmation_type": "touch",
+    "min_wick_ratio": 0.2,
+    "sl_pips": 15.0,
+    "max_hold_bars": 24,
+    "mode_direction": "hausse_only",
+    "total_trades": 247,
+    "win_rate": 59.1,
+    "profit_factor": 1.89,
+    "net_profit_usd": 91.95,
+    "max_drawdown_usd": 11.16,
+    "yearly": {
+      "2022": {
+        "trades": 7,
+        "win_rate": 85.7,
+        "net_pnl": 0.91
+      },
+      "2023": {
+        "trades": 69,
+        "win_rate": 55.1,
+        "net_pnl": 21.0
+      },
+      "2024": {
+        "trades": 58,
+        "win_rate": 62.1,
+        "net_pnl": 22.75
+      },
+      "2025": {
+        "trades": 66,
+        "win_rate": 60.6,
+        "net_pnl": 38.57
+      },
+      "2026": {
+        "trades": 47,
+        "win_rate": 55.3,
+        "net_pnl": 8.72
+      }
+    },
+    "score": 450.39
+  },
+  "autonomous_status": "INSTITUTIONAL_CALIBRATION_ACTIVE"
+}

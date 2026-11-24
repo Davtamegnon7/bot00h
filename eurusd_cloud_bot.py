@@ -1254,6 +1254,18 @@ def render_dashboard_html() -> str:
         </div>
     </header>
 
+    <!-- SÉLECTEUR DE PLATEFORME (DUAL BOT CLOUD) -->
+    <nav class="flex items-center space-x-2 bg-white/[0.03] p-1.5 rounded-2xl border border-white/[0.08] mb-6 font-mono text-xs">
+        <a href="/" class="flex items-center space-x-2 px-4 py-2 rounded-xl font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-lg shadow-cyan-500/10">
+            <span class="w-2 h-2 rounded-full bg-cyan-400 animate-pulse"></span>
+            <span>🇪🇺 EUR/USD (Session US 13h-21h45)</span>
+        </a>
+        <a href="/gold" class="flex items-center space-x-2 px-4 py-2 rounded-xl font-bold text-gray-400 hover:text-white hover:bg-white/[0.04] transition">
+            <span class="w-2 h-2 rounded-full bg-amber-400"></span>
+            <span>🪙 XAU/USD Gold (Minuit 00h00 Fibo)</span>
+        </a>
+    </nav>
+
     <!-- BANDEAU PRINCIPAL DE STATUT & SPOT EN DIRECT -->
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         <div class="glass-card p-5 md:col-span-2 flex flex-col justify-between border-l-4 border-l-cyan-500">
